@@ -1,95 +1,140 @@
+use anyhow::Result;
+use itertools::Itertools;
 use std::fs::File;
-use std::io::{self, BufRead, LineWriter, Write};
-use std::path::Path;
-use std::collections::HashMap;
+use std::io::{BufRead, BufReader, LineWriter, Write};
 use std::vec::Vec;
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 use std::thread;
 use std::sync::{Arc, Mutex};
+use num_format::{Locale,ToFormattedString};
 
-fn main() {
-    let now = SystemTime::now();
-    let filepath = "./words_alpha.txt";
+fn print_status(txt: &str, count:usize, elapsed: Duration) {
+    println!("{:>12} {} ({} ms)", count.to_formatted_string(&Locale::en), txt,
+        elapsed.as_millis().to_formatted_string(&Locale::en));
+}
+
+fn main() ->Result<()>{
+    let start = SystemTime::now();
     println!("BEGIN");
-    let words = read_vec(filepath);
-    let elapsed = now.elapsed();
-    println!("{} valid wordle words", words.len());
-    println!("{} ms to read file to map", elapsed.expect("should be ok").as_millis());
     let now = SystemTime::now();
-    let wordles = wordle(words);
-    let elapsed = now.elapsed();
-    println!("{} valid wordle combos", wordles.len());
-    println!("{} ms to wordle", elapsed.expect("should be ok").as_millis());
-    let file = File::create("wordle.txt").expect("Error creating output file!");
+    let wordfile = BufReader::new(File::open("./words_alpha.txt")?);
+    let all_words: Vec<String> = wordfile.lines().try_collect()?;
+    print_status("Words read from input file", all_words.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let five_words = all_words
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| w.len() == 5)
+        .sorted()
+        .collect_vec();
+    print_status("Found 5 letter words", five_words.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let word_masks = five_words
+        .iter()
+        .map(|w| word_to_bitmask(w))
+        .collect_vec();
+    print_status("Calculated letter masks", word_masks.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let uniq_masks = word_masks
+        .iter()
+        .filter_map(|(mask, is_valid)| is_valid.then_some(*mask))
+        .sorted()
+        .dedup()
+        .collect_vec();
+    print_status("Unique letter masks", uniq_masks.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let solution_masks = wordle_bitmasks(uniq_masks);
+    print_status("solution maps found", solution_masks.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let solutions = solution_masks
+        .into_iter()
+        .flat_map(|solution| {
+            solution
+            .into_iter()
+            .map(|mask| {
+                five_words
+                    .iter()
+                    .zip(word_masks.iter())
+                    .filter_map(move |(w,(m,_))| (mask == *m).then_some(*w))
+            })
+            .multi_cartesian_product()
+            .map(|solution| solution.into_iter().sorted().collect_vec())
+        })
+        .sorted();
+    print_status("Total solutions found", solutions.len(), now.elapsed()?);
+    let now = SystemTime::now();
+    let file = File::create("wordle.txt")?;
     let mut file = LineWriter::new(file);
-    for wordle in wordles {
-        file.write(format!("{}\n", wordle).as_bytes()).expect("Error writing line to output file!");
+    let lines = solutions.len();
+    for solution in solutions {
+        let line = solution.into_iter().fold(String::from(""), |acc, i| format!("{} {}", acc, i));
+        file.write(format!("{line}\n").as_bytes())?;
     }
-    println!("END");
+    print_status("Solutions written to file", lines, now.elapsed()?);
+    println!("END ({} ms)", start.elapsed()?.as_millis().to_formatted_string(&Locale::en));
+    Ok(())
 }
 
-fn filter_words(key: u64, words: &[(u64, Vec<String>)]) -> Vec<(u64, Vec<String>)> {
-    let mut filtered: Vec<(u64, Vec<String>)> = Vec::new();
-    for (k, v) in words {
-        if k & key == 0 {
-            filtered.push((*k, v.to_vec()));
-        }
+fn word_to_bitmask(word: &str) -> (u64, bool) {
+    let mut is_valid = true;
+    let mut bitmask = 0u64;
+    for c in word.bytes() {
+        let i = c as i64 - b'a' as i64;
+        assert!(i >= 0 && i < 26);
+        let m = 1 << i;
+        is_valid &= (bitmask & m) == 0;
+        bitmask |= m;
     }
-    filtered
+    (bitmask, is_valid)
 }
 
-fn append_words (a: &Vec<String>, b: &Vec<String>) -> Vec<String> {
-    let mut result: Vec<String> = Vec::new();
-    for a in a {
-        for b in b {
-            result.push(format!("{} {}", a, b));
-        }
-    }
-    result
-}
-
-fn wordle (words: Vec<(u64, Vec<String>)>) -> Vec<String> {
-    let now = SystemTime::now();
-    let result: Vec<String> = Vec::new();
+fn wordle_bitmasks(bitmasks: Vec<u64>) -> Vec<[u64;5]> {
+    let result: Vec<[u64;5]> = Vec::new();
     let mutex = Arc::new(Mutex::new(result));
     let i = Arc::new(Mutex::new(0));
     let mut threads = Vec::new();
     for _ in 0..thread::available_parallelism().expect("should be able to read core count").get() {
         let mutex = Arc::clone(&mutex);
-        let words = words.clone();
-        let i = i.clone();
-        let now = now.clone();
+        let bitmasks = bitmasks.clone();
+        let muti = i.clone();
         threads.push(thread::spawn(move || {
-            let mut a;
+            let mut i;
             loop {
                 {
-                    let mut i = i.lock().unwrap();
-                    a = *i;
-                    *i += 1;
+                    let mut muti = muti.lock().unwrap();
+                    i = *muti;
+                    *muti += 1;
                 }
-                if a >= words.len() { break; }
-                let (key, aword) = &words[a];
-                if a % 100 == 0 || a == words.len() - 1 {
-                    let elapsed = now.elapsed().expect("TIME ERROR");
-                    let seconds = elapsed.as_secs() % 60;
-                    let minutes = (elapsed.as_secs() / 60) % 60;
-                    let hours = (elapsed.as_secs() / 60) / 60;
-                    let percent = 100.0 * ( (a + 1) as f64 / words.len() as f64);
-                    println!("{} - {hours:0>2}:{minutes:0>2}:{seconds:0>2} - {percent:8.4}%", &aword[0]);
+                if i >= bitmasks.len() { break; }
+                let key_a = bitmasks[i];
+                let mask = key_a;
+
+                fn filter (key: u64, masks: &[u64]) -> Vec<u64> {
+                    masks.iter().copied().filter(|m| *m & key == 0)
+                    /*
+                    let mut v:Vec<u64> = Vec::new();
+                    for m in masks {
+                        if key & m == 0 {
+                            v.push(*m);
+                        }
+                    }
+                    v
+                    */
                 }
-                let innerwords = filter_words(*key, &words[(a+1)..]);
-                for (b, (bkey, bword)) in innerwords.iter().enumerate() {
-                    let key = key | bkey;
-                    let innerwords = filter_words(key, &innerwords[(b+1)..]);
-                    for (c, (ckey, cword)) in innerwords.iter().enumerate() {
-                        let key = key | ckey;
-                        let innerwords = filter_words(key, &innerwords[(c+1)..]);
-                        for (d, (dkey, dword)) in innerwords.iter().enumerate() {
-                            let key = key | dkey;
-                            let innerwords = filter_words(key, &innerwords[(d+1)..]);
-                            for (_, (_, eword)) in innerwords.iter().enumerate() {
+
+                let masks_b = filter(mask, &bitmasks[i+1..]);
+                for (b, &key_b) in masks_b.iter().enumerate() {
+                    let mask = mask | key_b;
+                    let masks_c = filter(mask, &masks_b[b+1..]);
+                    for (c, &key_c) in masks_c.iter().enumerate() {
+                        let mask = mask | key_c;
+                        let masks_d = filter(mask, &masks_c[c+1..]);
+                        for (d, &key_d) in masks_d.iter().enumerate() {
+                            let mask = mask | key_d;
+                            let masks_e = filter(mask, &masks_d[d+1..]);
+                            for &key_e in masks_e.iter() {
                                 let mut vec = mutex.lock().unwrap();
-                                vec.extend(append_words(aword, &append_words(bword, &append_words(cword, &append_words(dword, eword)))));
+                                vec.push([key_a, key_b, key_c, key_d, key_e]);
                             }
                         }
                     }
@@ -102,87 +147,6 @@ fn wordle (words: Vec<(u64, Vec<String>)>) -> Vec<String> {
         thread.join().unwrap();
     }
 
-    let x = (*mutex.lock().unwrap()).to_vec();
-    x
-}
-
-fn read_vec<P> (filepath: P) -> Vec<(u64, Vec<String>)>
-where P: AsRef<Path>, {
-    let mut words: Vec<(u64, Vec<String>)> = Vec::new();
-    let mut map: HashMap<u64, Vec<String>> = HashMap::new();
-
-    if let Ok(lines) = read_lines(filepath) {
-        for line in lines {
-            if let Ok(word) = line {
-                let (valid, bits) = string_to_bitfield(&word);
-                if !valid { continue }
-                if let Some(bin) = map.get_mut(&bits) {
-                    bin.push(word);
-                } else {
-                    let mut bin = Vec::new();
-                    bin.push(word);
-                    map.insert(bits, bin);
-                }
-            }
-        }
-    }
-    for (bits, vec) in map.iter() {
-        words.push((*bits,vec.to_vec()));
-    }
-    words.sort_by(|(_, a), (_, b) | a[0].cmp(&b[0]));
-    words
-
-}
-
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where P: AsRef<Path>, {
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
-}
-
-fn char_to_bit(s: char) -> u64 {
-    match s {
-        'a' => 1,
-        'b' => 1<<1,
-        'c' => 1<<2,
-        'd' => 1<<3,
-        'e' => 1<<4,
-        'f' => 1<<5,
-        'g' => 1<<6,
-        'h' => 1<<7,
-        'i' => 1<<8,
-        'j' => 1<<9,
-        'k' => 1<<10,
-        'l' => 1<<11,
-        'm' => 1<<12,
-        'n' => 1<<13,
-        'o' => 1<<14,
-        'p' => 1<<15,
-        'q' => 1<<16,
-        'r' => 1<<17,
-        's' => 1<<18,
-        't' => 1<<19,
-        'u' => 1<<20,
-        'v' => 1<<21,
-        'w' => 1<<22,
-        'x' => 1<<23,
-        'y' => 1<<24,
-        'z' => 1<<25,
-        _ => 1<<26
-    }
-}
-
-fn string_to_bitfield(s: &String) -> (bool, u64) {
-    let s = s.to_lowercase();
-    let mut count = 0;
-    let mut result = 0;
-    for (_i, letter) in s.chars().enumerate() {
-        let bit = char_to_bit(letter);
-        if result & bit == 0 {
-            count = count + 1;
-        }
-        result = result | char_to_bit(letter);
-    }
-    let valid_wordle = s.len() == 5 && count == 5;
-    (valid_wordle, result)
+    let result = (*mutex.lock().unwrap()).to_vec();
+    result
 }
