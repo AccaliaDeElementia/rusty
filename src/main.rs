@@ -109,18 +109,11 @@ fn wordle_bitmasks(bitmasks: Vec<u64>) -> Vec<[u64;5]> {
                 let key_a = bitmasks[i];
                 let mask = key_a;
 
-                fn filter (key: u64, masks: &[u64]) -> Vec<u64> {
-                    masks.iter().copied().filter(|m| *m & key == 0)
-                    /*
-                    let mut v:Vec<u64> = Vec::new();
-                    for m in masks {
-                        if key & m == 0 {
-                            v.push(*m);
-                        }
-                    }
-                    v
-                    */
-                }
+                let filter = |key: u64, masks: &[u64] | masks
+                    .iter()
+                    .copied()
+                    .filter(|m| *m & key == 0)
+                    .collect_vec();
 
                 let masks_b = filter(mask, &bitmasks[i+1..]);
                 for (b, &key_b) in masks_b.iter().enumerate() {
