@@ -29,7 +29,7 @@ fn main() ->Result<()>{
     let uniq_masks = dedup_masks(&word_masks);
     print_status("Unique letter masks", uniq_masks.len(), now.elapsed()?);
     let now = SystemTime::now();
-    let solution_masks = wordle_bitmasks(uniq_masks)?;
+    let solution_masks = wordle_bitmasks(uniq_masks.iter().copied().collect_vec())?;
     print_status("Solution maps found", solution_masks.len(), now.elapsed()?);
     let now = SystemTime::now();
     let solutions = map_solutions(solution_masks, five_words, word_masks.into_iter().map(|(m,_)| m).collect_vec());
@@ -54,10 +54,9 @@ fn calculate_masks(words: &Vec<String>) -> Vec<(u64, bool)> {
         let mut is_valid = true;
         let mut bitmask = 0u64;
         for c in word.bytes() {
-            let i = c as i64 - b'a' as i64;
-            assert!(i >= 0 && i < 26);
-            is_valid &= (bitmask & 1 << i) == 0;
-            bitmask |= 1 << i;
+            let mut i = c as i64 - b'a' as i64;
+            if i < 0 && i >= 26 { i = 26; }
+            (is_valid, bitmask) = (is_valid && i < 26 && (bitmask & 1 << i) == 0, bitmask | 1 << i);
         }
         (bitmask, is_valid)
     }).collect_vec()
@@ -71,23 +70,17 @@ fn threadded_loop(bitmasks: Vec<u64>, i: Arc<AtomicUsize>, result: Arc<Mutex<Vec
     loop {
         let i = i.fetch_add(1, Ordering::SeqCst);
         if i >= bitmasks.len() { break; }
-        let key_a = bitmasks[i];
-        let mask = key_a;
-
+        let (mask, key_a) = (bitmasks[i], bitmasks[i]);
         let filter = |key: u64, masks: &[u64] | masks.iter().copied().filter(|m| *m & key == 0).collect_vec();
-
-        let masks_b = filter(mask, &bitmasks[i+1..]);
-        for (b, &key_b) in masks_b.iter().enumerate() {
-            let mask = mask | key_b;
-            let masks_c = filter(mask, &masks_b[b+1..]);
-            for (c, &key_c) in masks_c.iter().enumerate() {
-                let mask = mask | key_c;
-                let masks_d = filter(mask, &masks_c[c+1..]);
-                for (d, &key_d) in masks_d.iter().enumerate() {
-                    let mask = mask | key_d;
-                    let masks_e = filter(mask, &masks_d[d+1..]);
-                    if masks_e.len() == 0 { continue }
-                    let res = masks_e.iter().map(|&key_e| [key_a, key_b, key_c, key_d, key_e]);
+        let bitmasks = filter(mask, &bitmasks[i+1..]);
+        for (b, &key_b) in bitmasks.iter().enumerate() {
+            let (mask, bitmasks) = (mask | key_b, filter(mask | key_b, &bitmasks[b+1..]));
+            for (c, &key_c) in bitmasks.iter().enumerate() {
+                let (mask, bitmasks) = (mask | key_c, filter(mask | key_c, &bitmasks[c+1..]));
+                for (d, &key_d) in bitmasks.iter().enumerate() {
+                    let bitmasks = filter(mask | key_d, &bitmasks[d+1..]);
+                    if bitmasks.len() == 0 { continue }
+                    let res = bitmasks.iter().map(|&key_e| [key_a, key_b, key_c, key_d, key_e]);
                     let mut result = result.lock().unwrap();
                     result.extend(res);
                 }
